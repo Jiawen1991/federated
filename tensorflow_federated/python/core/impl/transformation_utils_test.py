@@ -1396,6 +1396,48 @@ class TransformationUtilsTest(parameterized.TestCase):
         }
     })
 
+  def test_reference_tracker_initializes(self):
+    dummy_tracker = transformation_utils.ReferenceTracker(
+        'x', computation_building_blocks.Data('bound_data', tf.int32))
+    self.assertEqual(dummy_tracker.name, 'x')
+    self.assertEqual(dummy_tracker.value.tff_repr, 'bound_data')
+    self.assertEqual(dummy_tracker.instances, 0)
+
+  def test_reference_tracker_updates(self):
+    dummy_tracker = transformation_utils.ReferenceTracker(
+        'x', computation_building_blocks.Data('bound_data', tf.int32))
+    for k in range(10):
+      dummy_tracker.update()
+      self.assertEqual(dummy_tracker.instances, k + 1)
+
+  def test_reference_tracker_equality_instances(self):
+    dummy_tracker = transformation_utils.ReferenceTracker(
+        'x', computation_building_blocks.Data('bound_data', tf.int32))
+    second_dummy_tracker = transformation_utils.ReferenceTracker(
+        'x', computation_building_blocks.Data('bound_data', tf.int32))
+    self.assertEqual(dummy_tracker, second_dummy_tracker)
+    dummy_tracker.update()
+    self.assertNotEqual(dummy_tracker, second_dummy_tracker)
+    second_dummy_tracker.update()
+    self.assertEqual(dummy_tracker, second_dummy_tracker)
+
+  def test_reference_tracker_equality_names(self):
+    dummy_tracker = transformation_utils.ReferenceTracker(
+        'x', computation_building_blocks.Data('bound_data', tf.int32))
+    second_dummy_tracker = transformation_utils.ReferenceTracker(
+        'x', computation_building_blocks.Data('bound_data', tf.int32))
+    second_dummy_tracker.name = 'y'
+    self.assertNotEqual(dummy_tracker, second_dummy_tracker)
+    dummy_tracker.name = 'y'
+    self.assertEqual(dummy_tracker, second_dummy_tracker)
+
+  def test_reference_tracker_equality_values(self):
+    dummy_tracker = transformation_utils.ReferenceTracker(
+        'x', computation_building_blocks.Data('bound_data', tf.int32))
+    second_dummy_tracker = transformation_utils.ReferenceTracker(
+        'x', computation_building_blocks.Data('other_data', tf.int32))
+    self.assertNotEqual(dummy_tracker, second_dummy_tracker)
+
 
 if __name__ == '__main__':
   absltest.main()

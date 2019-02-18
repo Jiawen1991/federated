@@ -22,11 +22,14 @@ import tensorflow as tf
 
 from tensorflow_federated.python.common_libs import py_typecheck
 from tensorflow_federated.python.core.api import computation_types
+from tensorflow_federated.python.core.api import computations
 from tensorflow_federated.python.core.api import placements
 from tensorflow_federated.python.core.impl import computation_building_blocks
+from tensorflow_federated.python.core.impl import computation_impl
 from tensorflow_federated.python.core.impl import context_stack_impl
 from tensorflow_federated.python.core.impl import intrinsic_defs
 from tensorflow_federated.python.core.impl import tensorflow_serialization
+from tensorflow_federated.python.core.impl import transformation_utils
 from tensorflow_federated.python.core.impl import transformations
 from tensorflow_federated.python.core.impl import type_utils
 
@@ -903,6 +906,351 @@ class TransformationsTest(parameterized.TestCase):
     inlined = transformations.inline_blocks_with_n_referenced_locals(
         outer_block)
     self.assertEqual(str(inlined), '(let  in <used,(let  in used1)>)')
+
+  def test_references_count_correctly_simple_block(self):
+    test_arg = computation_building_blocks.Data('test_data', tf.int32)
+    result = computation_building_blocks.Reference('test_x',
+                                                   test_arg.type_signature)
+    simple_block = computation_building_blocks.Block([('test_x', test_arg)],
+                                                     result)
+    context_stack = transformations.read_reference_counts_from_comp(
+        simple_block)
+
+    def _construct_context_stack():
+      constructed_context_stack = transformation_utils.SymbolTree(
+          transformation_utils.ReferenceTracker)
+      arg = transformation_utils.ReferenceTracker('test_x', test_arg)
+      arg.update()
+      constructed_context_stack._add_child(
+          1, transformation_utils.SequentialBindingNode(arg))
+      return constructed_context_stack
+
+    self.assertEqual(context_stack, _construct_context_stack())
+
+  def test_references_count_correctly_simple_block_two_references(self):
+    test_arg = computation_building_blocks.Data('test_data', tf.int32)
+    ref1 = computation_building_blocks.Reference('test_x',
+                                                 test_arg.type_signature)
+    ref2 = computation_building_blocks.Reference('test_x',
+                                                 test_arg.type_signature)
+    result = computation_building_blocks.Tuple([ref1, ref2])
+    simple_block = computation_building_blocks.Block([('test_x', test_arg)],
+                                                     result)
+    self.assertEqual(simple_block.tff_repr,
+                     '(let test_x=test_data in <test_x,test_x>)')
+    context_stack = transformations.read_reference_counts_from_comp(
+        simple_block)
+
+    def _construct_context_stack():
+      constructed_context_stack = transformation_utils.SymbolTree(
+          transformation_utils.ReferenceTracker)
+      arg = transformation_utils.ReferenceTracker('test_x', test_arg)
+      arg.update()
+      arg.update()
+      constructed_context_stack._add_child(
+          1, transformation_utils.SequentialBindingNode(arg))
+      return constructed_context_stack
+
+    self.assertEqual(context_stack, _construct_context_stack())
+
+  def test_references_count_correctly_block_lambda_name_conflict(self):
+    innermost_x = computation_building_blocks.Reference('x', tf.int32)
+    inner_lambda = computation_building_blocks.Lambda('x', tf.int32,
+                                                      innermost_x)
+    second_x = computation_building_blocks.Reference('x', tf.int32)
+    called_lambda = computation_building_blocks.Call(inner_lambda, second_x)
+    block_input = computation_building_blocks.Data('block_in', tf.int32)
+    block = computation_building_blocks.Block([('x', block_input)],
+                                              called_lambda)
+    self.assertEqual(block.tff_repr, '(let x=block_in in (x -> x)(x))')
+    context_stack = transformations.read_reference_counts_from_comp(block)
+
+    def _construct_context_stack():
+      constructed_context_stack = transformation_utils.SymbolTree(
+          transformation_utils.ReferenceTracker)
+      second_x_reference = transformation_utils.ReferenceTracker(
+          'x', block_input)
+      second_x_reference.update()
+      constructed_context_stack._add_child(
+          2, transformation_utils.SequentialBindingNode(second_x_reference))
+      constructed_context_stack._move_to_child(2)
+      last_x_reference = transformation_utils.ReferenceTracker('x', None)
+      last_x_reference.update()
+      constructed_context_stack._add_child(
+          3, transformation_utils.SequentialBindingNode(last_x_reference))
+      constructed_context_stack.move_to_parent_context()
+      return constructed_context_stack
+
+    # Objects themselves won't compare equal due as the keys don't align
+    self.assertEqual(str(context_stack), str(_construct_context_stack()))
+
+  def test_references_count_correctly_lambda_name_conflict(self):
+    inner_x = computation_building_blocks.Reference('x', tf.int32)
+    inner_lambda = computation_building_blocks.Lambda('x', tf.int32, inner_x)
+    outer_x = computation_building_blocks.Reference('x', tf.int32)
+    call = computation_building_blocks.Call(inner_lambda, outer_x)
+    outer_lambda = computation_building_blocks.Lambda('x', tf.int32, call)
+    self.assertEqual(outer_lambda.tff_repr, '(x -> (x -> x)(x))')
+    context_stack = transformations.read_reference_counts_from_comp(
+        outer_lambda)
+
+    def _construct_context_stack():
+      constructed_context_stack = transformation_utils.SymbolTree(
+          transformation_utils.ReferenceTracker)
+      x_reference = transformation_utils.ReferenceTracker('x', None)
+      x_reference.update()
+      constructed_context_stack._add_child(
+          0, transformation_utils.SequentialBindingNode(x_reference))
+      constructed_context_stack._move_to_child(0)
+      second_x_reference = transformation_utils.ReferenceTracker('x', None)
+      second_x_reference.update()
+      constructed_context_stack._add_child(
+          1, transformation_utils.SequentialBindingNode(second_x_reference))
+      constructed_context_stack.move_to_parent_context()
+      return constructed_context_stack
+
+    # Objects themselves won't compare equal due as the keys don't align
+    self.assertEqual(str(context_stack), str(_construct_context_stack()))
+
+  def test_references_count_correctly_nested_blocks_conflicting_names(self):
+    data = computation_building_blocks.Tuple(
+        [computation_building_blocks.Data('test', tf.int32)])
+    inner_block_output = computation_building_blocks.Reference(
+        'block_input', data.type_signature)
+    first_block = computation_building_blocks.Block([('block_input', data)],
+                                                    inner_block_output)
+    outer_block_output = computation_building_blocks.Reference(
+        'block_input', first_block.type_signature)
+    second_block = computation_building_blocks.Block(
+        [('block_input', first_block)], outer_block_output)
+
+    self.assertEqual(
+        second_block.tff_repr,
+        '(let block_input=(let block_input=<test> in block_input) in block_input)'
+    )
+    context_stack = transformations.read_reference_counts_from_comp(
+        second_block)
+
+    def _construct_context_stack():
+      # Note: the order in which these are added as children matters.
+      constructed_context_stack = transformation_utils.SymbolTree(
+          transformation_utils.ReferenceTracker)
+      test_tracker = transformation_utils.ReferenceTracker('block_input', data)
+      test_tracker.update()
+      constructed_context_stack._add_child(
+          2, transformation_utils.SequentialBindingNode(test_tracker))
+      local_def = transformation_utils.ReferenceTracker(
+          second_block.locals[0][0], second_block.locals[0][1])
+      local_def.update()
+      constructed_context_stack._add_child(
+          1, transformation_utils.SequentialBindingNode(local_def))
+      return constructed_context_stack
+
+    self.assertEqual(context_stack, _construct_context_stack())
+
+  def test_references_count_correctly_block_local_overwriting_name_in_scope(
+      self):
+    arg_comp = computation_building_blocks.Reference('arg',
+                                                     [tf.int32, tf.int32])
+    selected = computation_building_blocks.Selection(arg_comp, index=0)
+    internal_arg = computation_building_blocks.Reference('arg', tf.int32)
+    block = computation_building_blocks.Block([('arg', selected)], internal_arg)
+    lam = computation_building_blocks.Lambda('arg', arg_comp.type_signature,
+                                             block)
+    self.assertEqual(lam.tff_repr, '(arg -> (let arg=arg[0] in arg))')
+    context_stack = transformations.read_reference_counts_from_comp(lam)
+
+    def _construct_context_stack():
+      constructed_context_stack = transformation_utils.SymbolTree(
+          transformation_utils.ReferenceTracker)
+      outer_arg = transformation_utils.ReferenceTracker('arg', None)
+      outer_arg.update()
+      constructed_context_stack._add_child(
+          1, transformation_utils.SequentialBindingNode(outer_arg))
+      constructed_context_stack._move_to_child(1)
+      inner_arg = transformation_utils.ReferenceTracker('arg', selected)
+      inner_arg.update()
+      constructed_context_stack._add_child(
+          2, transformation_utils.SequentialBindingNode(inner_arg))
+      constructed_context_stack.move_to_parent_context()
+      return constructed_context_stack
+
+    self.assertEqual(context_stack, _construct_context_stack())
+
+  def test_references_count_correctly_nested_block_no_name_conflict(self):
+    used1 = computation_building_blocks.Reference('used1', tf.int32)
+    used2 = computation_building_blocks.Data('used2', tf.int32)
+    ref = computation_building_blocks.Reference('x', used1.type_signature)
+    lower_block = computation_building_blocks.Block([('x', used1)], ref)
+    higher_block = computation_building_blocks.Block([('used1', used2)],
+                                                     lower_block)
+    self.assertEqual(higher_block.tff_repr,
+                     '(let used1=used2 in (let x=used1 in x))')
+    context_stack = transformations.read_reference_counts_from_comp(
+        higher_block)
+
+    def _construct_first_context_stack():
+      constructed_context_stack = transformation_utils.SymbolTree(
+          transformation_utils.ReferenceTracker)
+      used1_tracker = transformation_utils.ReferenceTracker('used1', used2)
+      used1_tracker.update()
+      constructed_context_stack._add_child(
+          1, transformation_utils.SequentialBindingNode(used1_tracker))
+      constructed_context_stack._move_to_child(1)
+      x_tracker = transformation_utils.ReferenceTracker('x', used1)
+      x_tracker.update()
+      constructed_context_stack._add_child(
+          3, transformation_utils.SequentialBindingNode(x_tracker))
+      constructed_context_stack.move_to_parent_context()
+      return constructed_context_stack
+
+    self.assertEqual(context_stack, _construct_first_context_stack())
+
+  def test_references_resolve_correctly_nested_block_no_overwrite(self):
+    used1 = computation_building_blocks.Reference('used1', tf.int32)
+    used2 = computation_building_blocks.Data('used2', tf.int32)
+    user_inlined_lower_block = computation_building_blocks.Block([('x', used1)],
+                                                                 used1)
+    user_inlined_higher_block = computation_building_blocks.Block(
+        [('used1', used2)], user_inlined_lower_block)
+    self.assertEqual(user_inlined_higher_block.tff_repr,
+                     '(let used1=used2 in (let x=used1 in used1))')
+    second_context_stack = transformations.read_reference_counts_from_comp(
+        user_inlined_higher_block)
+
+    def _construct_second_context_stack():
+      constructed_context_stack = transformation_utils.SymbolTree(
+          transformation_utils.ReferenceTracker)
+      used1_tracker = transformation_utils.ReferenceTracker('used1', used2)
+      used1_tracker.update()
+      used1_tracker.update()
+      constructed_context_stack._add_child(
+          1, transformation_utils.SequentialBindingNode(used1_tracker))
+      constructed_context_stack._move_to_child(1)
+      x_tracker = transformation_utils.ReferenceTracker('x', used1)
+      constructed_context_stack._add_child(
+          3, transformation_utils.SequentialBindingNode(x_tracker))
+      constructed_context_stack.move_to_parent_context()
+      return constructed_context_stack
+
+    self.assertEqual(
+        str(second_context_stack), str(_construct_second_context_stack()))
+
+  def test_references_resolve_correctly_mixed_scope(self):
+    innermost = computation_building_blocks.Reference('x', tf.int32)
+    intermediate_arg = computation_building_blocks.Reference('y', tf.int32)
+    item2 = computation_building_blocks.Block([('x', intermediate_arg)],
+                                              innermost)
+    item1 = computation_building_blocks.Reference('x', tf.int32)
+    mediate_tuple = computation_building_blocks.Tuple([item1, item2])
+    used = computation_building_blocks.Data('used', tf.int32)
+    used1 = computation_building_blocks.Data('used1', tf.int32)
+    outer_block = computation_building_blocks.Block([('x', used), ('y', used1)],
+                                                    mediate_tuple)
+    self.assertEqual(outer_block.tff_repr,
+                     '(let x=used,y=used1 in <x,(let x=y in x)>)')
+    context_stack = transformations.read_reference_counts_from_comp(outer_block)
+
+    def _construct_context_stack():
+      constructed_context_stack = transformation_utils.SymbolTree(
+          transformation_utils.ReferenceTracker)
+      y_reference = transformation_utils.ReferenceTracker('y', used1)
+      y_reference.update()
+      x_reference = transformation_utils.ReferenceTracker('x', used)
+      x_reference.update()
+      constructed_context_stack._add_child(
+          1, transformation_utils.SequentialBindingNode(x_reference))
+      constructed_context_stack._move_to_child(1)
+      constructed_context_stack._add_younger_sibling(
+          transformation_utils.SequentialBindingNode(y_reference))
+      constructed_context_stack._move_to_younger_sibling()
+      x_tracker = transformation_utils.ReferenceTracker('x', intermediate_arg)
+      x_tracker.update()
+      constructed_context_stack._add_child(
+          6, transformation_utils.SequentialBindingNode(x_tracker))
+      constructed_context_stack.move_to_parent_context()
+      return constructed_context_stack
+
+    self.assertEqual(context_stack, _construct_context_stack())
+
+  def test_references_count_correctly_sequential_overwrite_in_block_locals(
+      self):
+    add_one = computation_building_blocks.ComputationBuildingBlock.from_proto(
+        computation_impl.ComputationImpl.get_proto(
+            computations.tf_computation(lambda x: x + 1, tf.int32)))
+
+    make_10 = computation_building_blocks.ComputationBuildingBlock.from_proto(
+        computation_impl.ComputationImpl.get_proto(
+            computations.tf_computation(lambda: tf.constant(10))))
+
+    make_13 = computation_building_blocks.Block(
+        [('x', computation_building_blocks.Call(make_10)),
+         ('x',
+          computation_building_blocks.Call(
+              add_one, computation_building_blocks.Reference('x', tf.int32))),
+         ('x',
+          computation_building_blocks.Call(
+              add_one, computation_building_blocks.Reference('x', tf.int32))),
+         ('x',
+          computation_building_blocks.Call(
+              add_one, computation_building_blocks.Reference('x', tf.int32)))],
+        computation_building_blocks.Reference('x', tf.int32))
+
+    references = transformations.read_reference_counts_from_comp(make_13)
+    self.assertRegexMatch(
+        str(references), [
+            r'\[OuterContext\*\]->'
+            r'\{\(\[Instance count: 1, value: '
+            r'comp.{9}\(\), name: x\]\-\['
+            r'Instance count: 1, value: '
+            r'comp.{9}\(x\), name: x\]\-\['
+            r'Instance count: 1, value: comp'
+            r'.{9}\(x\), name: x\]\-\[Instance '
+            r'count: 1, value: comp.{9}\(x\), '
+            r'name: x\]\)\}'
+        ])
+
+    child_id = list(references.active_node.children.keys())[0]
+
+    def _make_context_tree():
+      constructed_context_stack = transformation_utils.SymbolTree(
+          transformation_utils.ReferenceTracker)
+      make_ten_tracker = transformation_utils.ReferenceTracker(
+          'x', computation_building_blocks.Call(make_10))
+      make_ten_tracker.update()
+      constructed_context_stack._add_child(
+          child_id,
+          transformation_utils.SequentialBindingNode(make_ten_tracker))
+      constructed_context_stack._move_to_child(child_id)
+      first_add_one = transformation_utils.ReferenceTracker(
+          'x',
+          computation_building_blocks.Call(
+              add_one, computation_building_blocks.Reference('x', tf.int32)))
+      first_add_one.update()
+      constructed_context_stack._add_younger_sibling(
+          transformation_utils.SequentialBindingNode(first_add_one))
+      constructed_context_stack._move_to_younger_sibling()
+      second_add_one = transformation_utils.ReferenceTracker(
+          'x',
+          computation_building_blocks.Call(
+              add_one, computation_building_blocks.Reference('x', tf.int32)))
+      second_add_one.update()
+      constructed_context_stack._add_younger_sibling(
+          transformation_utils.SequentialBindingNode(second_add_one))
+      constructed_context_stack._move_to_younger_sibling()
+      third_add_one = transformation_utils.ReferenceTracker(
+          'x',
+          computation_building_blocks.Call(
+              add_one, computation_building_blocks.Reference('x', tf.int32)))
+      third_add_one.update()
+      constructed_context_stack._add_younger_sibling(
+          transformation_utils.SequentialBindingNode(third_add_one))
+      constructed_context_stack.move_to_parent_context()
+      return constructed_context_stack
+
+    constructed_tree = _make_context_tree()
+    self.assertEqual(str(references), str(constructed_tree))
+    self.assertEqual(references, constructed_tree)
 
 
 if __name__ == '__main__':

@@ -1192,3 +1192,28 @@ class InlineReferences(object):
           transform_postorder(comp.result, _execute_inlining_from_bound_dict))
     else:
       return comp
+
+
+class ReferenceTracker(BoundVariableTracker):
+  """Data container to track number References in an AST."""
+
+  def __init__(self, name, value):
+    super(ReferenceTracker, self).__init__(name, value)
+    self.instances = 0
+
+  def update(self, reference=None):
+    del reference
+    self.instances += 1
+
+  def __str__(self):
+    return 'Instance count: ' + str(self.instances) + ', value: ' + str(
+        self.value) + ', name: ' + str(self.name)
+
+  def __repr__(self):
+    return str(self)
+
+  def __eq__(self, other):
+    return isinstance(
+        other, ReferenceTracker) and (self.instances == other.instances and
+                                      self.name == other.name and
+                                      str(self.value) == str(other.value))

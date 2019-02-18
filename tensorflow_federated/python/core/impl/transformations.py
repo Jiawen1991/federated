@@ -339,3 +339,29 @@ def inline_blocks_with_n_referenced_locals(comp, inlining_threshold=1):
   op = transformation_utils.InlineReferences(inlining_threshold, count_snapshot,
                                              comp)
   return transformation_utils.transform_postorder(comp, op)
+
+
+def read_reference_counts_from_comp(comp):
+  """Constructs `ContextTracker` containing counts of References by context.
+
+  Args:
+    comp: Instance of `computation_building_blocks.ComputationBuildingBlock`
+      representing the root of the AST for which we want to read total reference
+      counts by context.
+
+  Returns:
+    Returns an instance of `ContextTracker` representing root of context tree
+    populated with ReferenceTrackers which have accurate reference counts.
+  """
+
+  reference_counter = transformation_utils.SymbolTree(
+      transformation_utils.ReferenceTracker)
+
+  def transform_fn(comp, context_tree):
+    if isinstance(comp, computation_building_blocks.Reference):
+      context_tree.update_payload_tracking_reference(comp)
+    return comp
+
+  transformation_utils.transform_postorder_with_symbol_bindings(
+      comp, transform_fn, reference_counter)
+  return reference_counter
